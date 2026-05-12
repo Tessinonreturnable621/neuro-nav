@@ -306,9 +306,10 @@ async function handleSearch(query: string) {
     return;
   }
   console.log(`${c.bold}Results (${res.data.length}):${c.reset}`);
+  const maxScore = Math.max(...res.data.map(r => r.score), 1);
   for (const r of res.data) {
-    const score = (r.score * 100).toFixed(0);
-    console.log(`  ${c.green}${score}%${c.reset} ${c.bold}${r.title}${c.reset}`);
+    const relevance = Math.round((r.score / maxScore) * 100);
+    console.log(`  ${c.green}${relevance}%${c.reset} ${c.bold}${r.title}${c.reset}`);
     console.log(`       ${c.dim}${r.url}${c.reset}`);
   }
 }
