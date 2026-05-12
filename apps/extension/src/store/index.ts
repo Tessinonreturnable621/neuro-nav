@@ -8,6 +8,7 @@ import type { WorkspaceEntity } from '@/core/entities/Workspace';
 import type { BranchEntity } from '@/core/entities/Branch';
 import type { StashEntry } from '@/core/use-cases/stashMemory';
 import type { PeerInfo, SharedWorkspace } from '@/core/entities/Peer';
+import type { ProjectContext } from '@/core/entities/ProjectContext';
 
 // ---- Tabs Slice ----
 
@@ -93,13 +94,20 @@ const workspacesSlice = createSlice({
 
 export interface BranchesState {
   items: BranchEntity[];
+  /** Per-window active branch: windowId -> branchName */
+  activeBranchByWindow: Record<number, string>;
+  /** Current window's active branch (set by popup on mount) */
   activeBranchName: string | null;
+  /** The current window ID (set by popup on mount) */
+  currentWindowId: number | null;
   loading: boolean;
 }
 
 const initialBranchesState: BranchesState = {
   items: [],
+  activeBranchByWindow: {},
   activeBranchName: null,
+  currentWindowId: null,
   loading: true,
 };
 
@@ -109,19 +117,55 @@ const branchesSlice = createSlice({
   reducers: {
     setBranches(state, action: PayloadAction<BranchEntity[]>) {
       state.items = action.payload;
-      state.activeBranchName = action.payload.find((b) => b.isActive)?.name ?? null;
+      // Rebuild activeBranchByWindow from branch data
+      const byWindow: Record<number, string> = {};
+      for (const b of action.payload) {
+        if (b.activeInWindows) {
+          for (const wid of b.activeInWindows) {
+            byWindow[wid] = b.name;
+          }
+        }
+      }
+      state.activeBranchByWindow = byWindow;
+      // Update current window's active branch
+      if (state.currentWindowId != null) {
+        state.activeBranchName = byWindow[state.currentWindowId] ?? null;
+      }
       state.loading = false;
     },
     addBranch(state, action: PayloadAction<BranchEntity>) {
       state.items.push(action.payload);
-      if (action.payload.isActive) state.activeBranchName = action.payload.name;
+      if (action.payload.activeInWindows) {
+        for (const wid of action.payload.activeInWindows) {
+          state.activeBranchByWindow[wid] = action.payload.name;
+        }
+      }
+      if (state.currentWindowId != null && action.payload.activeInWindows?.includes(state.currentWindowId)) {
+        state.activeBranchName = action.payload.name;
+      }
     },
     removeBranch(state, action: PayloadAction<string>) {
       state.items = state.items.filter((b) => b.id !== action.payload);
     },
+    /** Set active branch for a specific window */
+    setActiveBranchForWindow(state, action: PayloadAction<{ windowId: number; branchName: string }>) {
+      const { windowId, branchName } = action.payload;
+      state.activeBranchByWindow[windowId] = branchName;
+      if (state.currentWindowId === windowId) {
+        state.activeBranchName = branchName;
+      }
+    },
+    /** Legacy compat — sets activeBranchName directly */
     setActiveBranch(state, action: PayloadAction<string>) {
       state.activeBranchName = action.payload;
-      state.items.forEach((b) => { b.isActive = b.name === action.payload; });
+      if (state.currentWindowId != null) {
+        state.activeBranchByWindow[state.currentWindowId] = action.payload;
+      }
+    },
+    /** Set the current window ID (called once on popup mount) */
+    setCurrentWindowId(state, action: PayloadAction<number>) {
+      state.currentWindowId = action.payload;
+      state.activeBranchName = state.activeBranchByWindow[action.payload] ?? null;
     },
     updateBranchInStore(state, action: PayloadAction<BranchEntity>) {
       const idx = state.items.findIndex((b) => b.id === action.payload.id);
@@ -215,7 +259,7 @@ const peersSlice = createSlice({
 
 // ---- Navigation Slice ----
 
-export type NavPage = 'tabs' | 'workspaces' | 'branches' | 'graph' | 'peers';
+export type NavPage = 'tabs' | 'workspaces' | 'branches' | 'graph' | 'peers' | 'settings';
 
 export interface NavState {
   currentPage: NavPage;
@@ -231,6 +275,29 @@ const navSlice = createSlice({
   },
 });
 
+// ---- Project Slice (Phase 3 — Local Symbiosis) ----
+
+export interface ProjectState {
+  context: ProjectContext | null;
+  daemonConnected: boolean;
+}
+
+const projectSlice = createSlice({
+  name: 'project',
+  initialState: { context: null, daemonConnected: false } as ProjectState,
+  reducers: {
+    setProjectContext(state, action: PayloadAction<ProjectContext>) {
+      state.context = action.payload;
+    },
+    clearProjectContext(state) {
+      state.context = null;
+    },
+    setDaemonConnected(state, action: PayloadAction<boolean>) {
+      state.daemonConnected = action.payload;
+    },
+  },
+});
+
 // ---- Store ----
 
 export const store = configureStore({
@@ -241,6 +308,7 @@ export const store = configureStore({
     stash: stashSlice.reducer,
     peers: peersSlice.reducer,
     nav: navSlice.reducer,
+    project: projectSlice.reducer,
   },
   devTools: process.env.NODE_ENV !== 'production',
 });
@@ -251,7 +319,8 @@ export type AppDispatch = typeof store.dispatch;
 // Export actions
 export const { setTabs, setActiveTabId, updateTab, removeTab, setLoading } = tabsSlice.actions;
 export const { setWorkspaces, addWorkspace, removeWorkspace, updateWorkspace } = workspacesSlice.actions;
-export const { setBranches, addBranch, removeBranch, setActiveBranch, updateBranchInStore } = branchesSlice.actions;
+export const { setBranches, addBranch, removeBranch, setActiveBranch, setActiveBranchForWindow, setCurrentWindowId, updateBranchInStore } = branchesSlice.actions;
 export const { setStashEntries, addStashEntry, removeLatestStash } = stashSlice.actions;
 export const { setMyPeerInfo, setPeers, updatePeerStatus, removePeer, addIncomingShare, dismissIncomingShare } = peersSlice.actions;
 export const { navigate } = navSlice.actions;
+export const { setProjectContext, clearProjectContext, setDaemonConnected } = projectSlice.actions;

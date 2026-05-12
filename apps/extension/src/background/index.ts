@@ -3,15 +3,16 @@
    ============================================================ */
 
 import { createMessageRouter, MSG } from '@/shared/messaging';
-import { pruneOldRecords, getAllWorkspaces, getActiveBranch } from '@/infrastructure/db/database';
+import { pruneOldRecords, getAllWorkspaces, getActiveBranchForWindow, saveWorkspace } from '@/infrastructure/db/database';
 import * as branchOps from '@/core/use-cases/manageBranches';
 import * as stashOps from '@/core/use-cases/stashMemory';
 import { processExtractedPage } from '@/core/use-cases/pageIndexer';
-import { searchPages, getIndexCount, pruneOldPages } from '@/infrastructure/search/searchIndex';
+import { searchPages, getIndexCount, pruneOldPages, indexPage } from '@/infrastructure/search/searchIndex';
 import { shouldBlock } from '@/core/use-cases/intentBlocker';
 import { recordPageVisit, recordNavigation, getGraphData } from '@/core/use-cases/graphBuilder';
 import { classifyPage } from '@/core/entities/PageDocument';
 import { fromChromeTab, toSnapshot } from '@/core/entities/Tab';
+import type { ProjectContext } from '@/core/entities/ProjectContext';
 
 // ---- Message Router ----
 
@@ -56,25 +57,26 @@ const router = createMessageRouter({
   },
 
   [MSG.BRANCH_CREATE]: async (payload) => {
-    const { name } = payload as { name: string };
-    const currentTabs = (await chrome.tabs.query({ currentWindow: true }))
+    const { name, windowId } = payload as { name: string; windowId?: number };
+    const wid = windowId ?? (await chrome.windows.getCurrent()).id!;
+    const currentTabs = (await chrome.tabs.query({ windowId: wid }))
       .map(fromChromeTab).map(toSnapshot);
-    const branch = await branchOps.createNewBranch(name, currentTabs, true);
+    const branch = await branchOps.createNewBranch(name, currentTabs, true, wid);
     return { success: true, data: branch };
   },
 
   [MSG.BRANCH_CHECKOUT]: async (payload) => {
-    const { name } = payload as { name: string };
-    const currentTabs = (await chrome.tabs.query({ currentWindow: true }))
+    const { name, windowId } = payload as { name: string; windowId?: number };
+    const wid = windowId ?? (await chrome.windows.getCurrent()).id!;
+    const currentTabs = (await chrome.tabs.query({ windowId: wid }))
       .map(fromChromeTab).map(toSnapshot);
-    const result = await branchOps.checkoutBranch(name, currentTabs);
+    const result = await branchOps.checkoutBranch(name, currentTabs, wid);
 
-    // Swap tabs in the current window
-    const currentWindow = await chrome.windows.getCurrent();
-    const existingTabs = await chrome.tabs.query({ windowId: currentWindow.id });
+    // Swap tabs in the target window
+    const existingTabs = await chrome.tabs.query({ windowId: wid });
 
     for (const tab of result.tabsToOpen) {
-      await chrome.tabs.create({ windowId: currentWindow.id, url: tab.url, pinned: tab.pinned });
+      await chrome.tabs.create({ windowId: wid, url: tab.url, pinned: tab.pinned });
     }
     if (result.tabsToOpen.length > 0) {
       for (const tab of existingTabs) {
@@ -89,6 +91,12 @@ const router = createMessageRouter({
     const { id } = payload as { id: string };
     await branchOps.deleteBranchById(id);
     return { success: true };
+  },
+
+  [MSG.GET_WINDOW_BRANCH]: async (payload) => {
+    const { windowId } = payload as { windowId: number };
+    const branch = await branchOps.getActiveBranchForWindow(windowId);
+    return { success: true, data: branch ? { name: branch.name, id: branch.id } : null };
   },
 
   // ---- Stash handlers (Phase 2) ----
@@ -164,11 +172,13 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
   if (details.frameId !== 0) return;
 
   try {
-    const activeBranch = await getActiveBranch();
+    // Get the window this tab belongs to for window-scoped branch lookup
+    const tab = await chrome.tabs.get(details.tabId).catch(() => null);
+    if (!tab?.windowId) return;
+    const activeBranch = await getActiveBranchForWindow(tab.windowId);
     if (!activeBranch) return;
 
     // Get page title for better classification
-    const tab = await chrome.tabs.get(details.tabId).catch(() => null);
     const title = tab?.title ?? '';
     const result = shouldBlock(details.url, title, activeBranch.name);
     if (result.blocked) {
@@ -197,7 +207,7 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
                 @keyframes nnFadeOut{to{opacity:0;transform:translateY(-12px)}}
               </style>
               <div style="display:flex;align-items:flex-start;gap:10px">
-                <span style="font-size:20px;flex-shrink:0">⚠️</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#facc15" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                 <div style="flex:1;min-width:0">
                   <div style="font-size:13px;font-weight:600;margin-bottom:4px;color:#c4b5fd">Neuro-Nav</div>
                   <div style="font-size:12px;line-height:1.4;color:#cbd5e1">${msg}</div>
@@ -291,9 +301,117 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   lastTabUrl.delete(tabId);
 });
 
+// ---- Window Garbage Collection (Multi-Window State) ----
+
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  try {
+    await branchOps.detachWindowFromBranch(windowId);
+  } catch (err) {
+    console.error('[Neuro-Nav] Window GC failed:', err);
+  }
+});
+
+// ---- Real-time Tab ↔ Branch Sync ----
+// Re-snapshots the active branch's tabs whenever tabs change in a window.
+// Uses per-window debounce (500ms) to batch rapid changes into one DB write.
+
+const syncTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+function debouncedSyncBranchTabs(windowId: number) {
+  const existing = syncTimers.get(windowId);
+  if (existing) clearTimeout(existing);
+
+  syncTimers.set(windowId, setTimeout(async () => {
+    syncTimers.delete(windowId);
+    try {
+      const tabs = await chrome.tabs.query({ windowId });
+      const snapshots = tabs.map(fromChromeTab).map(toSnapshot);
+      const updated = await branchOps.syncBranchTabs(windowId, snapshots);
+      if (updated) {
+        console.log(`[Neuro-Nav] Synced ${snapshots.length} tabs → branch "${updated.name}"`);
+      }
+    } catch {
+      // Window may have closed between debounce — safe to ignore
+    }
+  }, 500));
+}
+
+// Tab closed
+chrome.tabs.onRemoved.addListener((_tabId, removeInfo) => {
+  if (removeInfo.isWindowClosing) return; // window GC handles this
+  debouncedSyncBranchTabs(removeInfo.windowId);
+});
+
+// Tab created
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.windowId) debouncedSyncBranchTabs(tab.windowId);
+});
+
+// Tab navigated (URL change complete)
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.windowId) {
+    debouncedSyncBranchTabs(tab.windowId);
+  }
+});
+
+// ---- Project Context Handler (Phase 3 — Local Symbiosis) ----
+
+const PROJECT_WORKSPACE_ID = 'auto-project-workspace';
+
+async function handleProjectContextUpdate(ctx: ProjectContext): Promise<void> {
+  if (!ctx || !ctx.techStack) return;
+
+  console.log(`[Neuro-Nav] Project context received: ${ctx.projectName} (${ctx.techStack.length} techs)`);
+
+  // 1. Save to chrome.storage.local for popup to read
+  await chrome.storage.local.set({ projectContext: ctx });
+
+  // 2. Inject doc URLs into Orama search index
+  for (const tech of ctx.techStack) {
+    if (!tech.docUrl) continue;
+    await indexPage({
+      url: tech.docUrl,
+      title: `${tech.name} Documentation`,
+      description: `Official docs for ${tech.name}${tech.version ? ` v${tech.version}` : ''} (${tech.category})`,
+      favicon: '',
+      text: `${tech.name} ${tech.category} documentation reference local project`,
+      category: 'docs',
+      extractedAt: Date.now(),
+    });
+  }
+
+  // 3. Create/update auto-workspace with doc tabs
+  const docTabs = ctx.techStack
+    .filter(t => t.docUrl)
+    .map((t, i) => ({
+      url: t.docUrl,
+      title: `${t.name} Docs`,
+      pinned: false,
+      favIconUrl: '',
+      index: i,
+    }));
+
+  if (docTabs.length > 0) {
+    await saveWorkspace({
+      id: PROJECT_WORKSPACE_ID,
+      name: `📂 ${ctx.projectName}`,
+      tabs: docTabs,
+      tags: ['auto', 'project', ...(ctx.gitBranch ? [ctx.gitBranch] : [])],
+      createdAt: ctx.scannedAt,
+      updatedAt: ctx.scannedAt,
+      color: 'hsl(152 68% 52%)',  // green for project
+      icon: '📂',
+    });
+  }
+
+  console.log(`[Neuro-Nav] Indexed ${ctx.techStack.length} doc URLs, workspace updated`);
+}
+
 // ---- CLI Bridge (WebSocket Client → nav-server) ----
 
-const CLI_SERVER_URL = 'ws://127.0.0.1:9500';
+const CLI_DEFAULT_URL = 'ws://127.0.0.1';
+const CLI_DEFAULT_PORT = '9500';
+const CLI_DEFAULT_TOKEN = 'neuro_nav_secure_token_2026';
 const CLI_RECONNECT_MS = 5_000;
 
 /** Handlers for CLI commands — reuses the same logic as the popup message router. */
@@ -309,15 +427,17 @@ const cliCommandHandlers: Record<string, (payload: unknown) => Promise<unknown>>
   },
   BRANCH_CHECKOUT: async (payload) => {
     const { name } = payload as { name: string };
-    const currentTabs = (await chrome.tabs.query({ currentWindow: true }))
+    // Option A: use last focused window for CLI checkout
+    const focusedWindow = await chrome.windows.getLastFocused({ populate: false });
+    const wid = focusedWindow.id!;
+    const currentTabs = (await chrome.tabs.query({ windowId: wid }))
       .map(fromChromeTab).map(toSnapshot);
-    const result = await branchOps.checkoutBranch(name, currentTabs);
+    const result = await branchOps.checkoutBranch(name, currentTabs, wid);
 
-    const currentWindow = await chrome.windows.getCurrent();
-    const existingTabs = await chrome.tabs.query({ windowId: currentWindow.id });
+    const existingTabs = await chrome.tabs.query({ windowId: wid });
 
     for (const tab of result.tabsToOpen) {
-      await chrome.tabs.create({ windowId: currentWindow.id, url: tab.url, pinned: tab.pinned });
+      await chrome.tabs.create({ windowId: wid, url: tab.url, pinned: tab.pinned });
     }
     if (result.tabsToOpen.length > 0) {
       for (const tab of existingTabs) {
@@ -328,9 +448,11 @@ const cliCommandHandlers: Record<string, (payload: unknown) => Promise<unknown>>
   },
   BRANCH_CREATE: async (payload) => {
     const { name } = payload as { name: string };
-    const currentTabs = (await chrome.tabs.query({ currentWindow: true }))
+    const focusedWindow = await chrome.windows.getLastFocused({ populate: false });
+    const wid = focusedWindow.id!;
+    const currentTabs = (await chrome.tabs.query({ windowId: wid }))
       .map(fromChromeTab).map(toSnapshot);
-    const branch = await branchOps.createNewBranch(name, currentTabs, true);
+    const branch = await branchOps.createNewBranch(name, currentTabs, true, wid);
     return { success: true, data: branch };
   },
   BRANCH_DELETE: async (payload) => {
@@ -370,19 +492,45 @@ const cliCommandHandlers: Record<string, (payload: unknown) => Promise<unknown>>
     const data = await getGraphData();
     return { success: true, data };
   },
+  SCAN_PROJECT: async (payload) => {
+    // This is forwarded to daemon — daemon handles it directly via SCAN_PROJECT
+    // Return error if daemon is not connected
+    return { success: false, error: 'SCAN_PROJECT must be sent through daemon' };
+  },
 };
 
 let cliSocket: WebSocket | null = null;
 let cliReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-function connectToCLIServer() {
+async function getSecretToken(): Promise<string> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['navSecret'], (result) => {
+      resolve(result.navSecret || CLI_DEFAULT_TOKEN);
+    });
+  });
+}
+
+async function getDaemonUrl(): Promise<string> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['navDaemonUrl', 'navDaemonPort'], (result) => {
+      const host = result.navDaemonUrl || CLI_DEFAULT_URL;
+      const port = result.navDaemonPort || CLI_DEFAULT_PORT;
+      resolve(`${host}:${port}`);
+    });
+  });
+}
+
+async function connectToCLIServer() {
   // Don't reconnect if already connected or connecting
   if (cliSocket && (cliSocket.readyState === WebSocket.OPEN || cliSocket.readyState === WebSocket.CONNECTING)) {
     return;
   }
 
+  const token = await getSecretToken();
+  const daemonUrl = await getDaemonUrl();
+
   try {
-    cliSocket = new WebSocket(CLI_SERVER_URL);
+    cliSocket = new WebSocket(daemonUrl, [token]);
   } catch {
     scheduleReconnect();
     return;
@@ -396,6 +544,8 @@ function connectToCLIServer() {
     }
     // Identify as extension
     cliSocket!.send(JSON.stringify({ source: 'extension', type: 'IDENTIFY' }));
+    // Notify popup about daemon state
+    chrome.storage.local.set({ daemonConnected: true });
   };
 
   cliSocket.onmessage = async (event) => {
@@ -408,6 +558,12 @@ function connectToCLIServer() {
 
     // Ignore server ack
     if (msg.type === 'CONNECTED') return;
+
+    // Handle daemon push messages (not request-response)
+    if (msg.type === 'PROJECT_CONTEXT_UPDATE') {
+      await handleProjectContextUpdate(msg.payload as ProjectContext);
+      return;
+    }
 
     // Dispatch to handler
     const handler = cliCommandHandlers[msg.type];
@@ -444,6 +600,8 @@ function connectToCLIServer() {
   cliSocket.onclose = () => {
     console.log('[Neuro-Nav] Disconnected from nav-server');
     cliSocket = null;
+    // Notify popup about daemon state
+    chrome.storage.local.set({ daemonConnected: false });
     scheduleReconnect();
   };
 
