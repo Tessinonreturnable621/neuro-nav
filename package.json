@@ -1,0 +1,22 @@
+{
+  "name": "neuro-nav",
+  "version": "3.0.0",
+  "private": true,
+  "description": "The Developer's Micro-OS — A browser-integrated micro operating system for software engineers",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/extension",
+    "build": "npm run build -w apps/extension",
+    "test": "npm run test -w apps/extension",
+    "lint": "npm run lint -w apps/extension"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}
