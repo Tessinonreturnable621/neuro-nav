@@ -17,7 +17,7 @@ async function init() {
   initializing = true;
 
   try {
-    extractor = await pipeline(
+    extractor = await (pipeline as any)(
       'feature-extraction',
       'Xenova/all-MiniLM-L6-v2',
       {

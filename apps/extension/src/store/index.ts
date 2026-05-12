@@ -11,7 +11,7 @@ import type { PeerInfo, SharedWorkspace } from '@/core/entities/Peer';
 
 // ---- Tabs Slice ----
 
-interface TabsState {
+export interface TabsState {
   items: TabEntity[];
   activeTabId: number | null;
   loading: boolean;
@@ -58,7 +58,7 @@ const tabsSlice = createSlice({
 
 // ---- Workspaces Slice ----
 
-interface WorkspacesState {
+export interface WorkspacesState {
   items: WorkspaceEntity[];
   loading: boolean;
 }
@@ -161,7 +161,7 @@ const stashSlice = createSlice({
 
 // ---- Peers Slice (Phase 5) ----
 
-interface PeersState {
+export interface PeersState {
   myPeerId: string;
   myDisplayName: string;
   peers: PeerInfo[];
@@ -217,7 +217,7 @@ const peersSlice = createSlice({
 
 export type NavPage = 'tabs' | 'workspaces' | 'branches' | 'graph' | 'peers';
 
-interface NavState {
+export interface NavState {
   currentPage: NavPage;
 }
 
