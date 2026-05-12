@@ -4,7 +4,7 @@
 </div>
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/neuro-nav/neuro-nav/main/apps/extension/public/icons/icon-128.png" alt="Neuro-Nav Logo" width="128" />
+  <img src="./apps/extension/public/icons/icon-128.png" alt="Neuro-Nav Logo" width="128" />
   <h1>🧠 Neuro-Nav</h1>
   <p><strong>The Developer's Micro-OS: Context management, semantic search, and AI-powered browsing for software engineers.</strong></p>
   
