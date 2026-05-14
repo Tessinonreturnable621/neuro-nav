@@ -4,7 +4,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
-import { navigate, restoreNav, type NavPage } from '@/store';
+import { navigate, restoreNav, setBranches, type NavPage } from '@/store';
 import { ActiveTabs } from './pages/ActiveTabs';
 import { Workspaces } from './pages/Workspaces';
 import { Branches } from './pages/Branches';
@@ -15,7 +15,7 @@ import { Snippets } from './pages/Snippets';
 import { Settings } from './pages/Settings';
 import { CommandPalette } from './components/CommandPalette';
 import { AiStatusBar, AiStatusDot } from './components/AiStatusBar';
-import { IconTabs, IconGrid, IconBranch, IconHistory, IconPeers, IconScissors, IconSettings, IconSearch, IconShieldLock, IconAlertTriangle } from '@/shared/ui/Icons';
+import { IconTabs, IconGrid, IconBranch, IconHistory, IconPeers, IconScissors, IconSettings, IconSearch, IconSync, IconShieldLock, IconAlertTriangle } from '@/shared/ui/Icons';
 import { Tooltip } from '@/shared/ui/Tooltip';
 
 const NAV_ITEMS: { page: NavPage; icon: typeof IconTabs; label: string; ready: boolean }[] = [
@@ -92,7 +92,7 @@ function SecretSetup({ onComplete }: { onComplete: () => void }) {
         {/* Logo */}
         <div className="flex flex-col items-center mb-5">
           <div className="w-12 h-12 rounded-xl bg-accent-primary/20 flex items-center justify-center mb-2 animate-pulse-glow">
-            <span className="text-xl font-bold text-gradient-primary">N</span>
+            <img src="/icons/icon-48.png" alt="Neuro-Nav" className="w-6 h-6" />
           </div>
           <h1 className="text-base font-bold text-text-primary">Welcome to Neuro-Nav</h1>
           <p className="text-[11px] text-text-tertiary mt-0.5">Let's get you connected</p>
@@ -156,6 +156,20 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [daemonConnected, setDaemonConnected] = useState(false);
   const [secretReady, setSecretReady] = useState<boolean | null>(null); // null = loading
+  const [syncing, setSyncing] = useState(false);
+
+  const handleSync = useCallback(async () => {
+    setSyncing(true);
+    try {
+      await chrome.runtime.sendMessage({ type: 'FULL_SYNC' });
+      // Re-fetch branches from DB so UI reflects the reconciled state
+      const { listBranches } = await import('@/core/use-cases/manageBranches');
+      const branches = await listBranches();
+      dispatch(setBranches(branches));
+    } catch { /* background may not respond */ }
+    // Keep spinner for at least 600ms for visual feedback
+    setTimeout(() => setSyncing(false), 600);
+  }, [dispatch]);
 
   // Check if secret key is configured
   useEffect(() => {
@@ -205,7 +219,7 @@ export function App() {
     return (
       <div className="flex items-center justify-center h-[540px] w-[380px] bg-surface-base overflow-hidden">
         <div className="w-8 h-8 rounded-xl bg-accent-primary/20 flex items-center justify-center animate-pulse-glow">
-          <span className="text-base font-bold text-gradient-primary">N</span>
+          <img src="/icons/icon-48.png" alt="Neuro-Nav" className="w-5 h-5" />
         </div>
       </div>
     );
@@ -281,6 +295,16 @@ export function App() {
             {NAV_ITEMS.find((n) => n.page === currentPage)?.label ?? 'Settings'}
           </h1>
           <div className="flex items-center gap-1.5">
+            <Tooltip content="Sync with Browser" position="bottom">
+              <button
+                onClick={handleSync}
+                disabled={syncing}
+                className="p-1.5 rounded-md text-text-tertiary hover:text-accent-secondary hover:bg-accent-secondary/10 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                id="sync-trigger"
+              >
+                <IconSync size={14} className={syncing ? 'animate-spin' : ''} />
+              </button>
+            </Tooltip>
             <Tooltip content="Search (Ctrl+K)" position="bottom">
               <button
                 onClick={() => setPaletteOpen(true)}

@@ -240,6 +240,18 @@ export async function getAllSnippets(): Promise<SnippetEntity[]> {
   return db.getAllFromIndex('snippets', 'by-created');
 }
 
+/**
+ * Delete all snippets belonging to a specific branch.
+ */
+export async function deleteSnippetsByBranch(branch: string): Promise<number> {
+  const db = await getDB();
+  const snippets = await db.getAllFromIndex('snippets', 'by-branch', branch);
+  for (const snip of snippets) {
+    await db.delete('snippets', snip.id);
+  }
+  return snippets.length;
+}
+
 export async function deleteSnippet(id: string): Promise<void> {
   const db = await getDB();
   await db.delete('snippets', id);

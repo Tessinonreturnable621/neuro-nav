@@ -1,6 +1,6 @@
 import { StrictMode, useState, useEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
-import { IconShieldLock, IconCheck } from '@/shared/ui/Icons';
+import { IconCheck } from '@/shared/ui/Icons';
 import '@/index.css';
 
 function OptionsApp() {
@@ -104,7 +104,7 @@ function OptionsApp() {
       <div className="max-w-2xl mx-auto animate-fade-in">
         <div className="flex items-center gap-3 mb-8">
           <div className="w-10 h-10 rounded-xl bg-accent-primary/20 flex items-center justify-center animate-pulse-glow">
-            <span className="text-lg font-bold text-gradient-primary">N</span>
+            <img src="/icons/icon-48.png" alt="Neuro-Nav" className="w-5 h-5" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-text-primary">Neuro-Nav Settings</h1>

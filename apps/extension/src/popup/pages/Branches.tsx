@@ -16,48 +16,8 @@ import { Button } from '@/shared/ui/Button';
 import { Input } from '@/shared/ui/Input';
 import { Badge } from '@/shared/ui/Badge';
 import { Tooltip } from '@/shared/ui/Tooltip';
-import { IconPlus, IconTrash, IconBranch, IconPlay, IconExternalLink } from '@/shared/ui/Icons';
+import { IconPlus, IconTrash, IconBranch, IconPlay, IconExternalLink, IconPencil } from '@/shared/ui/Icons';
 
-/** Ask the background to group all tabs in a window under a named Chrome Tab Group */
-async function requestSyncTabGroup(windowId: number, branchName: string): Promise<void> {
-  try {
-    await chrome.runtime.sendMessage({
-      type: 'SYNC_TAB_GROUP',
-      payload: { windowId, branchName },
-    });
-  } catch { /* ignore if background is not ready */ }
-}
-
-/** Ask the background to ungroup all tabs in a window (remove Chrome Tab Group) */
-async function requestUngroupTabs(windowId: number): Promise<void> {
-  try {
-    await chrome.runtime.sendMessage({
-      type: 'UNGROUP_TABS',
-      payload: { windowId },
-    });
-  } catch { /* ignore */ }
-}
-
-/** Toggle collapse/expand a branch's Chrome Tab Group */
-async function requestCollapseTabGroup(windowId: number, branchName: string): Promise<boolean | null> {
-  try {
-    const resp = await chrome.runtime.sendMessage({
-      type: 'COLLAPSE_TAB_GROUP',
-      payload: { windowId, branchName },
-    });
-    return resp?.collapsed ?? null;
-  } catch { return null; }
-}
-
-/** Close (remove all tabs in) a branch's Chrome Tab Group */
-async function requestCloseTabGroup(windowId: number, branchName: string): Promise<void> {
-  try {
-    await chrome.runtime.sendMessage({
-      type: 'CLOSE_TAB_GROUP',
-      payload: { windowId, branchName },
-    });
-  } catch { /* ignore */ }
-}
 
 const DEFAULT_PREFIXES = ['space', 'feat', 'work', 'research', 'project', 'personal', 'temp'];
 
@@ -102,6 +62,8 @@ export function Branches() {
   const [checkingOut, setCheckingOut] = useState<string | null>(null);
   const [merging, setMerging] = useState<string | null>(null);  // branch name being merged
   const [mergeTarget, setMergeTarget] = useState<string>('');
+  const [renaming, setRenaming] = useState<string | null>(null); // branch id being renamed
+  const [renameValue, setRenameValue] = useState<string>('');
   const [windowId, setWindowId] = useState<number | null>(null);
 
   const allPrefixes = [...DEFAULT_PREFIXES, ...customPrefixes];
@@ -110,23 +72,12 @@ export function Branches() {
     ? (customPrefix.replace(/\//g, '').trim().toLowerCase() + '/')
     : (prefix + '/');
 
-  // Resolve current window ID + detect active branch from current tab's group
+  // Resolve current window ID
   useEffect(() => {
     chrome.windows.getCurrent().then(async (win) => {
       if (win.id == null) return;
       setWindowId(win.id);
       dispatch(setCurrentWindowId(win.id));
-
-      // Detect which branch the user is actually in based on the active tab's group
-      try {
-        const [activeTab] = await chrome.tabs.query({ windowId: win.id, active: true });
-        if (activeTab?.groupId && activeTab.groupId !== -1) {
-          const group = await chrome.tabGroups.get(activeTab.groupId);
-          if (group.title) {
-            dispatch(setActiveBranchForWindow({ windowId: win.id, branchName: group.title }));
-          }
-        }
-      } catch { /* no active tab or group — use stored mapping */ }
     });
   }, [dispatch]);
 
@@ -203,8 +154,6 @@ export function Branches() {
       const branch = await branchOps.createNewBranch(fullName, tabs, true, targetWid);
       dispatch(addBranch(branch));
       dispatch(setActiveBranchForWindow({ windowId: targetWid, branchName: branch.name }));
-      // Sync Chrome Tab Group
-      requestSyncTabGroup(targetWid, fullName);
       setNewBranchName('');
       // Persist custom prefix (stored without '/')
       if (isCustom && customPrefix.trim()) {
@@ -221,13 +170,12 @@ export function Branches() {
     }
   }, [newBranchName, activePrefix, branches, windowId, isCustom, customPrefix, dispatch, getCurrentTabs]);
 
-  // Checkout branch (Switch) — delegate to background for atomic tab+group handling
+  // Checkout branch (Switch) — DB + tab ops only, no Chrome group creation
   const handleCheckout = useCallback(async (name: string) => {
     setCheckingOut(name);
     try {
       const wid = windowId ?? (await chrome.windows.getCurrent()).id!;
 
-      // Delegate entirely to background — it handles tab swap + group creation atomically
       await chrome.runtime.sendMessage({
         type: 'BRANCH_CHECKOUT',
         payload: { name, windowId: wid },
@@ -235,7 +183,6 @@ export function Branches() {
 
       dispatch(setActiveBranchForWindow({ windowId: wid, branchName: name }));
 
-      // Reload branches from DB
       const updated = await branchOps.listBranches();
       dispatch(setBranches(updated));
     } catch (err) {
@@ -245,7 +192,7 @@ export function Branches() {
     }
   }, [dispatch, windowId]);
 
-  // Checkout branch in a NEW window
+  // Checkout branch in a NEW window — DB + open window only, no Chrome group creation
   const handleCheckoutNewWindow = useCallback(async (name: string) => {
     setCheckingOut(name);
     try {
@@ -253,6 +200,7 @@ export function Branches() {
         type: 'BRANCH_CHECKOUT_NEW_WINDOW',
         payload: { name },
       });
+
       const updated = await branchOps.listBranches();
       dispatch(setBranches(updated));
     } catch (err) {
@@ -265,21 +213,12 @@ export function Branches() {
   // Delete branch
   const handleDelete = useCallback(async (id: string) => {
     try {
-      // Find the branch to check if it's active in any window
-      const branch = branches.find(b => b.id === id);
-      const activeWindows = branch?.activeInWindows ?? [];
-
       await branchOps.deleteBranchById(id);
       dispatch(removeBranch(id));
-
-      // Ungroup tabs in all windows where this branch was active
-      for (const wid of activeWindows) {
-        requestUngroupTabs(wid);
-      }
     } catch (err) {
       console.error('Delete failed:', err);
     }
-  }, [dispatch, branches]);
+  }, [dispatch]);
 
   // Merge branch
   const handleMerge = useCallback(async (sourceName: string, targetName: string) => {
@@ -296,6 +235,21 @@ export function Branches() {
       setMergeTarget('');
     } catch (err) {
       console.error('Merge failed:', err);
+    }
+  }, [dispatch]);
+
+  // Rename branch
+  const handleRename = useCallback(async (id: string, newName: string) => {
+    const cleaned = sanitizeName(newName);
+    if (!cleaned) return;
+    try {
+      await branchOps.renameBranch(id, cleaned);
+      const updated = await branchOps.listBranches();
+      dispatch(setBranches(updated));
+      setRenaming(null);
+      setRenameValue('');
+    } catch (err) {
+      console.error('Rename failed:', err);
     }
   }, [dispatch]);
 
@@ -389,15 +343,15 @@ export function Branches() {
               id="branch-prefix-select"
             >
               {allPrefixes.map((p) => (
-                <option key={p} value={p}>{p}/</option>
+                <option key={p} value={p}>{p}</option>
               ))}
-              <option value="__custom__">Custom…</option>
+              <option value="__custom__">Custom</option>
             </select>
           )}
           <Input
             placeholder="session name"
             value={newBranchName}
-            onChange={(e) => { setNewBranchName(sanitizeName(e.target.value)); setDuplicateError(''); }}
+            onChange={(e) => { setNewBranchName(e.target.value); setDuplicateError(''); }}
             onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
             className="flex-1 font-mono text-xs rounded-l-none! border-l-0!"
             id="branch-name-input"
@@ -469,46 +423,45 @@ export function Branches() {
                       {otherWindowCount > 0 && ` · open in ${otherWindowCount} other window${otherWindowCount > 1 ? 's' : ''}`}
                     </span>
                   </div>
-                  {isActiveHere ? (
-                    <Tooltip content="Close group (Alt+Shift+W)">
-                      <button
-                        onClick={() => windowId && requestCloseTabGroup(windowId, branch.name)}
-                        className="p-1 rounded text-text-tertiary hover:text-accent-danger hover:bg-accent-danger/10 transition-colors cursor-pointer"
-                      >
-                        <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M18 6L6 18" />
-                          <path d="M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </Tooltip>
-                  ) : (
-                    <Button
-                      variant="ghost" size="sm"
-                      icon={<IconPlay size={11} />}
-                      loading={checkingOut === branch.name}
-                      onClick={() => handleCheckout(branch.name)}
-                    >
-                      Switch
-                    </Button>
+                      {!isActiveHere && (
+                        <>
+                          <Button
+                            variant="ghost" size="sm"
+                            icon={<IconPlay size={11} />}
+                            loading={checkingOut === branch.name}
+                            onClick={() => handleCheckout(branch.name)}
+                            >
+                              Switch
+                            </Button>
+                          <Tooltip content="Open in new window">
+                            <button
+                              onClick={() => handleCheckoutNewWindow(branch.name)}
+                              className="p-1 rounded text-text-tertiary hover:text-accent-primary hover:bg-accent-primary/10 transition-colors cursor-pointer"
+                            >
+                              <IconExternalLink size={12} />
+                            </button>
+                          </Tooltip>
+                      </>
                   )}
-                  <Tooltip content="Open in new window">
-                    <button
-                      onClick={() => handleCheckoutNewWindow(branch.name)}
-                      className="p-1 rounded text-text-tertiary hover:text-accent-primary hover:bg-accent-primary/10 transition-colors cursor-pointer"
-                    >
-                      <IconExternalLink size={12} />
-                    </button>
-                  </Tooltip>
+                 
                   {branches.length > 1 && merging !== branch.name && (
                     <Tooltip content="Merge into another session">
                       <button
-                        onClick={() => { setMerging(branch.name); setMergeTarget(''); }}
+                        onClick={() => { setMerging(branch.name); setMergeTarget(''); setRenaming(null); }}
                         className="p-1 rounded text-text-tertiary hover:text-accent-secondary hover:bg-accent-secondary/10 transition-colors cursor-pointer"
                       >
                         <IconBranch size={12} />
                       </button>
                     </Tooltip>
                   )}
+                  <Tooltip content="Rename session">
+                    <button
+                      onClick={() => { setRenaming(branch.id); setRenameValue(branch.name); setMerging(null); }}
+                      className="p-1 rounded text-text-tertiary hover:text-accent-primary hover:bg-accent-primary/10 transition-colors cursor-pointer"
+                    >
+                      <IconPencil size={12} />
+                    </button>
+                  </Tooltip>
                   {!isActiveAnywhere && (
                     <Tooltip content="Delete session">
                       <button
@@ -545,6 +498,36 @@ export function Branches() {
                     </Button>
                     <button
                       onClick={() => setMerging(null)}
+                      className="p-1 rounded text-text-tertiary hover:text-text-primary transition-colors cursor-pointer text-xs"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+                {renaming === branch.id && (
+                  <div className="flex items-center gap-1.5 mt-1.5 pl-5 animate-fade-in">
+                    <span className="text-[10px] text-text-tertiary shrink-0">Rename</span>
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRename(branch.id, renameValue);
+                        if (e.key === 'Escape') { setRenaming(null); setRenameValue(''); }
+                      }}
+                      className="flex-1 bg-surface-overlay text-xs font-mono text-text-primary
+                                 px-2 py-1 rounded border border-border-subtle
+                                 outline-none focus:border-accent-primary/40 transition-colors"
+                    />
+                    <Button
+                      variant="primary" size="sm"
+                      disabled={!renameValue.trim() || sanitizeName(renameValue) === branch.name}
+                      onClick={() => handleRename(branch.id, renameValue)}
+                    >
+                      Save
+                    </Button>
+                    <button
+                      onClick={() => { setRenaming(null); setRenameValue(''); }}
                       className="p-1 rounded text-text-tertiary hover:text-text-primary transition-colors cursor-pointer text-xs"
                     >
                       ✕

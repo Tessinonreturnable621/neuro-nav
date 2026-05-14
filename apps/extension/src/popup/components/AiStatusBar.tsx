@@ -72,7 +72,7 @@ export function AiStatusBar() {
 
   return (
     <div className="px-3 py-1.5 border-b border-border-subtle bg-surface-raised/60 animate-fade-in">
-      <div className="flex items-center gap-2">
+      {!isReady && <div className="flex items-center gap-2">
         <IconBrain
           size={14}
           className={
@@ -90,12 +90,12 @@ export function AiStatusBar() {
             ? 'Set up failed'
             : fileName
             ? `Loading config: ${fileName.split('/').pop()}`
-            : 'Setup ...'}
+            : 'Setting up'}
         </span>
         <span className="text-[10px] font-mono text-text-tertiary w-8 text-right">
           {Math.round(progress)}%
         </span>
-      </div>
+      </div>}
 
       {/* Progress bar */}
       {!isReady && !isError && (

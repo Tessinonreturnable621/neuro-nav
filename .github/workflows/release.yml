@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release'
+        description: 'Tag to release (e.g. v0.0.0)'
         required: true
-        default: 'v1.0.0'
+        default: 'v0.0.0'
   push:
     tags:
       - 'v*'
@@ -19,6 +19,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Determine version tag
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building release for $TAG"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -34,14 +41,16 @@ jobs:
 
       - name: Package Extension
         run: |
+          TAG="${{ steps.version.outputs.tag }}"
           cd apps/extension
-          zip -r neuro-nav-extension.zip dist public package.json
+          zip -r "neuro-nav-extension-${TAG}.zip" dist/ public/ package.json
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: apps/extension/neuro-nav-extension.zip
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Neuro-Nav ${{ steps.version.outputs.tag }}
+          files: apps/extension/neuro-nav-extension-${{ steps.version.outputs.tag }}.zip
           generate_release_notes: true
           draft: false
           prerelease: false

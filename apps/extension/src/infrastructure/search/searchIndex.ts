@@ -87,6 +87,39 @@ async function removeChunksByUrl(url: string): Promise<void> {
   db.close();
 }
 
+/**
+ * Delete all chunks belonging to a specific branch from IDB.
+ * Also invalidates the Orama in-memory index to force re-hydration.
+ */
+export async function deleteChunksByBranch(branchName: string): Promise<number> {
+  const db = await openIDB();
+  const tx = db.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  const req = store.getAll();
+  const deleted = await new Promise<number>((resolve, reject) => {
+    req.onsuccess = () => {
+      const chunks = req.result as ChunkDocument[];
+      let count = 0;
+      for (const chunk of chunks) {
+        if (chunk.branch === branchName) {
+          store.delete(chunk.id);
+          count++;
+        }
+      }
+      tx.oncomplete = () => resolve(count);
+    };
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+
+  // Force Orama re-hydration on next search
+  if (deleted > 0 && oramaInstance) {
+    oramaInstance = null;
+  }
+
+  return deleted;
+}
+
 // ---- Orama Index ----
 
 let oramaInstance: AnyOrama | null = null;

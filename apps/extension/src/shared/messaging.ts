@@ -65,6 +65,7 @@ export const MSG = {
   SESSION_SUMMARY_GET: 'SESSION_SUMMARY_GET',
 
   // Generic
+  FULL_SYNC: 'FULL_SYNC',
   PING: 'PING',
   PONG: 'PONG',
   ERROR: 'ERROR',

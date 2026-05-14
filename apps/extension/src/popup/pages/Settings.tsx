@@ -230,6 +230,7 @@ export function Settings() {
           )}
         </button>
 
+
         {/* Danger Zone: Reset Data */}
         <section className="glass-panel p-4 space-y-2.5 border border-accent-danger/20">
           <div className="flex items-center gap-2">

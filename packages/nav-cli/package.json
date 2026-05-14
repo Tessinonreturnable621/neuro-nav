@@ -7,19 +7,44 @@
     "nav": "dist/index.js",
     "neuro-nav-native-host": "dist/native-host.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
-    "dev": "node --watch src/index.ts"
+    "dev": "node --watch src/index.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "ws": "^8.18.0",
-    "@neuro-nav/server": "^1.0.0"
+    "@neuro-nav/server": "^1.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
     "@types/ws": "^8.18.0",
     "typescript": "~5.8.3"
   },
-  "keywords": ["neuro-nav", "cli", "browser-extension", "tabs", "workspace"],
-  "license": "MIT"
+  "keywords": [
+    "neuro-nav",
+    "cli",
+    "browser-extension",
+    "tabs",
+    "workspace",
+    "developer-tools",
+    "git-flow"
+  ],
+  "author": "Phan Nguyễn Quốc Minh <minhpnq1807@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khovan123/neuro-nav.git",
+    "directory": "packages/nav-cli"
+  },
+  "homepage": "https://github.com/khovan123/neuro-nav#readme",
+  "bugs": {
+    "url": "https://github.com/khovan123/neuro-nav/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
