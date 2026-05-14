@@ -18,6 +18,47 @@ import { Badge } from '@/shared/ui/Badge';
 import { Tooltip } from '@/shared/ui/Tooltip';
 import { IconPlus, IconTrash, IconBranch, IconPlay, IconExternalLink } from '@/shared/ui/Icons';
 
+/** Ask the background to group all tabs in a window under a named Chrome Tab Group */
+async function requestSyncTabGroup(windowId: number, branchName: string): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'SYNC_TAB_GROUP',
+      payload: { windowId, branchName },
+    });
+  } catch { /* ignore if background is not ready */ }
+}
+
+/** Ask the background to ungroup all tabs in a window (remove Chrome Tab Group) */
+async function requestUngroupTabs(windowId: number): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'UNGROUP_TABS',
+      payload: { windowId },
+    });
+  } catch { /* ignore */ }
+}
+
+/** Toggle collapse/expand a branch's Chrome Tab Group */
+async function requestCollapseTabGroup(windowId: number, branchName: string): Promise<boolean | null> {
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      type: 'COLLAPSE_TAB_GROUP',
+      payload: { windowId, branchName },
+    });
+    return resp?.collapsed ?? null;
+  } catch { return null; }
+}
+
+/** Close (remove all tabs in) a branch's Chrome Tab Group */
+async function requestCloseTabGroup(windowId: number, branchName: string): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'CLOSE_TAB_GROUP',
+      payload: { windowId, branchName },
+    });
+  } catch { /* ignore */ }
+}
+
 const DEFAULT_PREFIXES = ['space', 'feat', 'work', 'research', 'project', 'personal', 'temp'];
 
 /** Sanitize session name: lowercase, no slashes, spaces → dashes, trim leading/trailing dashes */
@@ -69,13 +110,23 @@ export function Branches() {
     ? (customPrefix.replace(/\//g, '').trim().toLowerCase() + '/')
     : (prefix + '/');
 
-  // Resolve current window ID on mount
+  // Resolve current window ID + detect active branch from current tab's group
   useEffect(() => {
-    chrome.windows.getCurrent().then((win) => {
-      if (win.id != null) {
-        setWindowId(win.id);
-        dispatch(setCurrentWindowId(win.id));
-      }
+    chrome.windows.getCurrent().then(async (win) => {
+      if (win.id == null) return;
+      setWindowId(win.id);
+      dispatch(setCurrentWindowId(win.id));
+
+      // Detect which branch the user is actually in based on the active tab's group
+      try {
+        const [activeTab] = await chrome.tabs.query({ windowId: win.id, active: true });
+        if (activeTab?.groupId && activeTab.groupId !== -1) {
+          const group = await chrome.tabGroups.get(activeTab.groupId);
+          if (group.title) {
+            dispatch(setActiveBranchForWindow({ windowId: win.id, branchName: group.title }));
+          }
+        }
+      } catch { /* no active tab or group — use stored mapping */ }
     });
   }, [dispatch]);
 
@@ -152,6 +203,8 @@ export function Branches() {
       const branch = await branchOps.createNewBranch(fullName, tabs, true, targetWid);
       dispatch(addBranch(branch));
       dispatch(setActiveBranchForWindow({ windowId: targetWid, branchName: branch.name }));
+      // Sync Chrome Tab Group
+      requestSyncTabGroup(targetWid, fullName);
       setNewBranchName('');
       // Persist custom prefix (stored without '/')
       if (isCustom && customPrefix.trim()) {
@@ -168,30 +221,20 @@ export function Branches() {
     }
   }, [newBranchName, activePrefix, branches, windowId, isCustom, customPrefix, dispatch, getCurrentTabs]);
 
-  // Checkout branch
+  // Checkout branch (Switch) — delegate to background for atomic tab+group handling
   const handleCheckout = useCallback(async (name: string) => {
     setCheckingOut(name);
     try {
-      const currentTabs = await getCurrentTabs();
       const wid = windowId ?? (await chrome.windows.getCurrent()).id!;
-      const { tabsToOpen } = await branchOps.checkoutBranch(name, currentTabs, wid);
 
-      // Close current tabs and open branch tabs
-      const existingTabs = await chrome.tabs.query({ windowId: wid });
-
-      // Open new tabs first
-      for (const tab of tabsToOpen) {
-        await chrome.tabs.create({ windowId: wid, url: tab.url, pinned: tab.pinned });
-      }
-
-      // Then close old tabs (skip if branch has no tabs)
-      if (tabsToOpen.length > 0) {
-        for (const tab of existingTabs) {
-          if (tab.id) chrome.tabs.remove(tab.id);
-        }
-      }
+      // Delegate entirely to background — it handles tab swap + group creation atomically
+      await chrome.runtime.sendMessage({
+        type: 'BRANCH_CHECKOUT',
+        payload: { name, windowId: wid },
+      });
 
       dispatch(setActiveBranchForWindow({ windowId: wid, branchName: name }));
+
       // Reload branches from DB
       const updated = await branchOps.listBranches();
       dispatch(setBranches(updated));
@@ -200,7 +243,7 @@ export function Branches() {
     } finally {
       setCheckingOut(null);
     }
-  }, [dispatch, getCurrentTabs]);
+  }, [dispatch, windowId]);
 
   // Checkout branch in a NEW window
   const handleCheckoutNewWindow = useCallback(async (name: string) => {
@@ -222,12 +265,21 @@ export function Branches() {
   // Delete branch
   const handleDelete = useCallback(async (id: string) => {
     try {
+      // Find the branch to check if it's active in any window
+      const branch = branches.find(b => b.id === id);
+      const activeWindows = branch?.activeInWindows ?? [];
+
       await branchOps.deleteBranchById(id);
       dispatch(removeBranch(id));
+
+      // Ungroup tabs in all windows where this branch was active
+      for (const wid of activeWindows) {
+        requestUngroupTabs(wid);
+      }
     } catch (err) {
       console.error('Delete failed:', err);
     }
-  }, [dispatch]);
+  }, [dispatch, branches]);
 
   // Merge branch
   const handleMerge = useCallback(async (sourceName: string, targetName: string) => {
@@ -417,7 +469,19 @@ export function Branches() {
                       {otherWindowCount > 0 && ` · open in ${otherWindowCount} other window${otherWindowCount > 1 ? 's' : ''}`}
                     </span>
                   </div>
-                  {!isActiveHere && (
+                  {isActiveHere ? (
+                    <Tooltip content="Close group (Alt+Shift+W)">
+                      <button
+                        onClick={() => windowId && requestCloseTabGroup(windowId, branch.name)}
+                        className="p-1 rounded text-text-tertiary hover:text-accent-danger hover:bg-accent-danger/10 transition-colors cursor-pointer"
+                      >
+                        <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M18 6L6 18" />
+                          <path d="M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </Tooltip>
+                  ) : (
                     <Button
                       variant="ghost" size="sm"
                       icon={<IconPlay size={11} />}

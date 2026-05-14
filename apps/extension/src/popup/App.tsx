@@ -4,24 +4,26 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
-import { navigate, type NavPage } from '@/store';
+import { navigate, restoreNav, type NavPage } from '@/store';
 import { ActiveTabs } from './pages/ActiveTabs';
 import { Workspaces } from './pages/Workspaces';
 import { Branches } from './pages/Branches';
 import { BrowsingGraph } from './pages/BrowsingGraph';
+import { History } from './pages/History';
 import { Peers } from './pages/Peers';
 import { Snippets } from './pages/Snippets';
 import { Settings } from './pages/Settings';
 import { CommandPalette } from './components/CommandPalette';
 import { AiStatusBar, AiStatusDot } from './components/AiStatusBar';
-import { IconTabs, IconGrid, IconBranch, IconGraph, IconPeers, IconScissors, IconSettings, IconSearch, IconShieldLock, IconAlertTriangle } from '@/shared/ui/Icons';
+import { IconTabs, IconGrid, IconBranch, IconHistory, IconPeers, IconScissors, IconSettings, IconSearch, IconShieldLock, IconAlertTriangle } from '@/shared/ui/Icons';
 import { Tooltip } from '@/shared/ui/Tooltip';
 
 const NAV_ITEMS: { page: NavPage; icon: typeof IconTabs; label: string; ready: boolean }[] = [
   { page: 'tabs', icon: IconTabs, label: 'Open Tabs', ready: true },
   { page: 'workspaces', icon: IconGrid, label: 'Workspaces', ready: true },
   { page: 'branches', icon: IconBranch, label: 'Sessions', ready: true },
-  { page: 'graph', icon: IconGraph, label: 'Web Map', ready: true },
+
+  { page: 'history', icon: IconHistory, label: 'History', ready: true },
   { page: 'snippets', icon: IconScissors, label: 'Snippets', ready: true },
   { page: 'peers', icon: IconPeers, label: 'Team', ready: true },
 ];
@@ -36,6 +38,8 @@ function PageContent({ page }: { page: NavPage }) {
       return <Branches />;
     case 'graph':
       return <BrowsingGraph />;
+    case 'history':
+      return <History />;
     case 'snippets':
       return <Snippets />;
     case 'peers':
@@ -159,6 +163,15 @@ export function App() {
       setSecretReady(!!result.navSecret);
     });
   }, []);
+
+  // Restore last active nav page
+  useEffect(() => {
+    chrome.storage.local.get(['neuroNavActivePage'], (result) => {
+      if (result.neuroNavActivePage) {
+        dispatch(restoreNav(result.neuroNavActivePage as NavPage));
+      }
+    });
+  }, [dispatch]);
 
   // Listen for daemon connection state changes
   useEffect(() => {
@@ -297,7 +310,7 @@ export function App() {
             <AiStatusDot />
           </Tooltip>
           <span className="text-[10px] font-mono text-text-tertiary bg-surface-overlay px-1.5 py-0.5 rounded">
-            v1.0.0
+            v1.5.0
           </span>
         </footer>
       </main>
